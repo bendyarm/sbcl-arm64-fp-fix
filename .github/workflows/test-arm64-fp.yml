@@ -1,0 +1,52 @@
+# Test floating-point trap handling on Linux ARM64
+name: Test ARM64 FP Traps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-c-level:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test C-level FP traps
+        run: |
+          gcc -o test-fp-traps test-fp-traps.c -lm
+          ./test-fp-traps
+
+  test-sbcl-patched:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl git build-essential libzstd-dev
+
+      - name: Clone and patch SBCL
+        run: |
+          git clone --depth 1 https://git.code.sf.net/p/sbcl/sbcl sbcl-src
+          cd sbcl-src
+          patch -p1 < ../arm64-linux-os.c.patch
+
+      - name: Build SBCL
+        run: |
+          cd sbcl-src
+          sh make.sh --without-immobile-space --without-immobile-code --without-compact-instance-header --fancy
+        timeout-minutes: 60
+
+      - name: Test FP traps in patched SBCL
+        run: |
+          cd sbcl-src
+          ./run-sbcl.sh --eval '
+            (handler-case
+                (progn
+                  (sb-int:set-floating-point-modes :traps (list :overflow))
+                  (let ((result (* 1d308 1d308)))
+                    (format t "FAIL: No trap, result=~A~%" result)
+                    (sb-ext:exit :code 1)))
+              (floating-point-overflow ()
+                (format t "SUCCESS: Caught floating-point-overflow~%")
+                (sb-ext:exit :code 0)))'

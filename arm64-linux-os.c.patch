@@ -1,0 +1,64 @@
+--- a/src/runtime/arm64-linux-os.c
++++ b/src/runtime/arm64-linux-os.c
+@@ -14,6 +14,7 @@
+ #include <sys/types.h>
+ #include <signal.h>
+ #include <sys/time.h>
++#include <asm/sigcontext.h>  /* for fpsimd_context */
+ #include <sys/resource.h>
+ #include <sys/mman.h>
+ #include <sys/utsname.h>
+@@ -28,11 +29,54 @@ size_t os_vm_page_size;
+
+ int arch_os_thread_init(struct thread *thread) { return 1; }
+
++/* Magic value identifying fpsimd_context in __reserved area */
++#define FPSIMD_MAGIC 0x46508001
++
++/* Structure matching kernel's fpsimd_context */
++struct fpsimd_context_local {
++    struct {
++        __u32 magic;
++        __u32 size;
++    } head;
++    __u32 fpsr;
++    __u32 fpcr;
++    /* vregs follow but we don't need them */
++};
++
++/* Find fpsimd_context in the __reserved area of mcontext */
++static struct fpsimd_context_local *
++get_fpsimd_context(os_context_t *context)
++{
++    /* The __reserved area contains a sequence of context records.
++     * Each starts with a magic/size header. We look for FPSIMD_MAGIC. */
++    unsigned char *ptr = (unsigned char *)context->uc_mcontext.__reserved;
++    unsigned char *end = ptr + sizeof(context->uc_mcontext.__reserved);
++
++    while (ptr + sizeof(struct fpsimd_context_local) <= end) {
++        struct fpsimd_context_local *fp = (struct fpsimd_context_local *)ptr;
++        if (fp->head.magic == FPSIMD_MAGIC) {
++            return fp;
++        }
++        if (fp->head.magic == 0 || fp->head.size == 0) {
++            break;  /* End of records */
++        }
++        ptr += fp->head.size;
++    }
++    return NULL;
++}
++
+ void
+ os_restore_fp_control(os_context_t *context)
+ {
+-    /* FIXME: Implement. */
++    struct fpsimd_context_local *fpctx = get_fpsimd_context(context);
++    if (fpctx) {
++        /* Restore FPCR from signal context.
++         * Clear exception flags (bits 0-4) while preserving control bits. */
++        unsigned int fpcr = fpctx->fpcr & ~0x1F;
++        __asm__ __volatile__ ("msr fpcr, %0" : : "r" ((unsigned long)fpcr));
++    }
+ }
+
+ os_context_register_t *
