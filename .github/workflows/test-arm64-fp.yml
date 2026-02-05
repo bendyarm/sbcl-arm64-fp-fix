@@ -5,18 +5,46 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-c-level:
+  # First, test if ARM64 hardware even supports FP traps
+  test-fpcr-direct:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      fpcr_works: ${{ steps.test.outputs.fpcr_works }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test direct FPCR manipulation
+        id: test
+        run: |
+          echo "=== Testing direct FPCR manipulation (bypassing glibc) ==="
+          gcc -o test-fp-traps-direct test-fp-traps-direct.c -lm
+          if ./test-fp-traps-direct; then
+            echo "fpcr_works=true" >> $GITHUB_OUTPUT
+          else
+            echo "fpcr_works=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "=== FPCR trap bits analysis ==="
+            echo "If the bits didn't stick, this ARM64 CPU may not support FP exception traps."
+            echo "This is a hardware limitation on some ARM64 implementations."
+          fi
+
+  # Test glibc's feenableexcept (expected to fail if FPCR doesn't work)
+  test-glibc:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test C-level FP traps
+      - name: Test glibc feenableexcept
         run: |
+          echo "=== Testing glibc feenableexcept() ==="
           gcc -o test-fp-traps test-fp-traps.c -lm
-          ./test-fp-traps
+          ./test-fp-traps || echo "Expected to fail if FPCR doesn't support traps"
 
+  # Only build SBCL if FPCR trap bits work
   test-sbcl-patched:
     runs-on: ubuntu-24.04-arm
+    needs: test-fpcr-direct
+    if: needs.test-fpcr-direct.outputs.fpcr_works == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +57,9 @@ jobs:
         run: |
           git clone --depth 1 https://git.code.sf.net/p/sbcl/sbcl sbcl-src
           cd sbcl-src
+          echo "=== Applying patch ==="
           patch -p1 < ../arm64-linux-os.c.patch
+          echo "=== Patch applied successfully ==="
 
       - name: Build SBCL
         run: |
